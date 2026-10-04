@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
+    "db:seed:test": "tsx prisma/seed-test-members.ts",
     "setup": "prisma generate && prisma db push && tsx prisma/seed.ts"
   },
   "dependencies": {

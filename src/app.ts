@@ -29,3 +29,6 @@ app.use("/api/v1", v1);
 
 app.use((_r, res) => res.status(404).json({ error: "Not found." }));
 app.use(errorHandler);
+
+// Vercel auto-detects src/app.ts as the Express entry and requires a default export.
+export default app;

@@ -3,5 +3,5 @@
     "target": "ES2022", "module": "commonjs", "outDir": "dist", "rootDir": ".",
     "strict": true, "esModuleInterop": true, "skipLibCheck": true, "resolveJsonModule": true
   },
-  "include": ["src", "prisma/seed.ts"]
+  "include": ["src", "prisma/seed.ts", "prisma/seed-test-members.ts"]
 }
