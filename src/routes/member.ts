@@ -1,6 +1,4 @@
 import { Router } from "express";
-import fs from "fs";
-import path from "path";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
@@ -8,7 +6,8 @@ import { requireMember } from "../lib/auth";
 import { matchesFor, includeTags, mutualIds } from "../lib/matching";
 import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { activity, memberLabel, normPhone } from "../lib/util";
-import { photoUpload, UPLOAD_DIR } from "./public";
+import { photoUpload } from "./public";
+import { removeObject, saveUpload } from "../lib/storage";
 
 export const memberRouter = Router();
 memberRouter.use(requireMember);
@@ -36,7 +35,7 @@ async function syncMainPhoto(memberId: string) {
 }
 
 // ---------- Account ----------
-memberRouter.get("/me", wrap(async (req, res) => { res.json(toSelf(await loadMe(me(req)))); }));
+memberRouter.get("/me", wrap(async (req, res) => { res.json(await toSelf(await loadMe(me(req)))); }));
 
 // Only contact details are editable by the member. Bio data changes go through the admin.
 memberRouter.patch("/me", wrap(async (req, res) => {
@@ -52,7 +51,7 @@ memberRouter.patch("/me", wrap(async (req, res) => {
   }
   const m = await prisma.member.update({ where: { id: me(req) }, data: d, include: includeTags });
   await activity(who(m), "UPDATED_CONTACT_DETAILS", "Member", m.id);
-  res.json(toSelf(m));
+  res.json(await toSelf(m));
 }));
 
 memberRouter.get("/summary", wrap(async (req, res) => {
@@ -66,20 +65,20 @@ memberRouter.get("/summary", wrap(async (req, res) => {
 // ---------- Photos (member chooses which one is the main photo) ----------
 memberRouter.post("/photos", photoUpload.array("photo", MAX_PHOTOS), wrap(async (req, res) => {
   const files = (req.files as Express.Multer.File[] | undefined) ?? [];
-  const cleanup = () => files.forEach((f) => fs.unlink(f.path, () => {}));
   if (!files.length) throw new HttpError(422, "Choose at least one photo to upload.");
   const have = await prisma.photo.count({ where: { memberId: me(req) } });
-  if (have + files.length > MAX_PHOTOS) { cleanup(); throw new HttpError(422, `You can keep up to ${MAX_PHOTOS} photos. Remove one to add another.`); }
+  if (have + files.length > MAX_PHOTOS) throw new HttpError(422, `You can keep up to ${MAX_PHOTOS} photos. Remove one to add another.`);
   const wantMain = String(req.body.mainIndex ?? "") !== "" ? Number(req.body.mainIndex) : -1;
   const hasMain = !!(await prisma.photo.findFirst({ where: { memberId: me(req), isMain: true } }));
   if (wantMain >= 0 && files[wantMain]) await prisma.photo.updateMany({ where: { memberId: me(req) }, data: { isMain: false } });
-  for (const [i, f] of files.entries()) {
-    await prisma.photo.create({ data: { memberId: me(req), url: `/uploads/photos/${f.filename}`, isMain: wantMain >= 0 ? i === wantMain : !hasMain && i === 0 } });
+  const keys = await Promise.all(files.map((f) => saveUpload("photos", f)));
+  for (const [i, key] of keys.entries()) {
+    await prisma.photo.create({ data: { memberId: me(req), url: key, isMain: wantMain >= 0 ? i === wantMain : !hasMain && i === 0 } });
   }
   await syncMainPhoto(me(req));
   const m = await loadMe(me(req));
   await activity(who(m), "UPLOADED_PHOTOS", "Photo", undefined, { count: files.length });
-  res.status(201).json(toSelf(m).photos);
+  res.status(201).json((await toSelf(m)).photos);
 }));
 
 memberRouter.patch("/photos/:id/main", wrap(async (req, res) => {
@@ -92,18 +91,18 @@ memberRouter.patch("/photos/:id/main", wrap(async (req, res) => {
   await syncMainPhoto(me(req));
   const m = await loadMe(me(req));
   await activity(who(m), "CHANGED_MAIN_PHOTO", "Photo", p.id);
-  res.json(toSelf(m).photos);
+  res.json((await toSelf(m)).photos);
 }));
 
 memberRouter.delete("/photos/:id", wrap(async (req, res) => {
   const p = await prisma.photo.findFirst({ where: { id: String(req.params.id), memberId: me(req) } });
   if (!p) throw new HttpError(404, "Photo not found.");
   await prisma.photo.delete({ where: { id: p.id } });
-  fs.unlink(path.join(UPLOAD_DIR, "photos", path.basename(p.url)), () => {});
+  await removeObject(p.url);
   await syncMainPhoto(me(req));
   const m = await loadMe(me(req));
   await activity(who(m), "DELETED_PHOTO", "Photo", p.id);
-  res.json(toSelf(m).photos);
+  res.json((await toSelf(m)).photos);
 }));
 
 // ---------- Matches & profiles ----------
@@ -117,7 +116,7 @@ memberRouter.get("/matches", wrap(async (req, res) => {
   const slice = all.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
   res.json({
     total: all.length, page: q.page, pageSize: q.pageSize,
-    items: slice.map((m) => ({ ...(mutual.has(m.id) ? toMutualProfile(m) : toPublicProfile(m)), liked: liked.has(m.id), mutual: mutual.has(m.id) })),
+    items: await Promise.all(slice.map(async (m) => ({ ...(await (mutual.has(m.id) ? toMutualProfile(m) : toPublicProfile(m))), liked: liked.has(m.id), mutual: mutual.has(m.id) }))),
   });
 }));
 
@@ -137,7 +136,7 @@ memberRouter.get("/profiles/:id", wrap(async (req, res) => {
     prisma.introRequest.findUnique({ where: { requesterId_targetId: { requesterId: me(req), targetId: p.id } } }),
   ]);
   res.json({
-    ...(isMutual ? toMutualProfile(p) : toPublicProfile(p)), liked: !!like, mutual: isMutual,
+    ...(await (isMutual ? toMutualProfile(p) : toPublicProfile(p))), liked: !!like, mutual: isMutual,
     introduction: intro ? { status: intro.status, label: STATUS_LABEL[intro.status] } : null,
   });
 }));
@@ -185,10 +184,10 @@ memberRouter.get("/likes", wrap(async (req, res) => {
     prisma.introRequest.findMany({ where: { requesterId: me(req) } }),
   ]);
   const byTarget = new Map(intros.map((i) => [i.targetId, i]));
-  res.json(likes.map((l) => {
+  res.json(await Promise.all(likes.map(async (l) => {
     const i = byTarget.get(l.likedId); const isMutual = mutual.has(l.likedId);
-    return { ...(isMutual ? toMutualProfile(l.liked) : toPublicProfile(l.liked)), liked: true, mutual: isMutual, likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
-  }));
+    return { ...(await (isMutual ? toMutualProfile(l.liked) : toPublicProfile(l.liked))), liked: true, mutual: isMutual, likedAt: l.createdAt, introduction: i ? { status: i.status, label: STATUS_LABEL[i.status] } : null };
+  })));
 }));
 
 memberRouter.post("/introductions", wrap(async (req, res) => {

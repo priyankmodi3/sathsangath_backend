@@ -65,7 +65,8 @@ async function main() {
     }
   }
 
-  if ((await prisma.member.count()) === 0) {
+  // Demo members/likes/photos are only for local development: set SEED_DEMO=true. Never on a real database.
+  if (process.env.SEED_DEMO === "true" && (await prisma.member.count()) === 0) {
     const hash = await bcrypt.hash("Demo@1234", 10);
     const byCode: Record<number, { id: string; name: string }> = {};
     for (const [n, gender, fullName, community, city, age, education, profession, photo, status] of people) {

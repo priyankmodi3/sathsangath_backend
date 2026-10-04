@@ -1,6 +1,5 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import path from "path";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../lib/db";
@@ -11,7 +10,8 @@ import { toAdminMember } from "../lib/serializers";
 import { audit, tempPassword } from "../lib/util";
 import { notifyMember } from "../lib/notify";
 import { config } from "../lib/config";
-import { createSubmission, intakeSchema, UPLOAD_DIR } from "./public";
+import { createSubmission, intakeSchema } from "./public";
+import { removeObject, resolveUrl } from "../lib/storage";
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin());
@@ -63,14 +63,15 @@ adminRouter.get("/members", wrap(async (req, res) => {
     prisma.member.count({ where }),
     prisma.member.findMany({ where, include: includeTags, orderBy: { createdAt: "desc" }, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
   ]);
-  res.json({ total, page: q.page, pageSize: q.pageSize, items: rows.map(toAdminMember) });
+  res.json({ total, page: q.page, pageSize: q.pageSize, items: await Promise.all(rows.map(toAdminMember)) });
 }));
 
 adminRouter.get("/members/export.csv", wrap(async (req, res) => {
   const rows = await prisma.member.findMany({ where: buildWhere(listQuery.parse(req.query)), include: includeTags, orderBy: { createdAt: "desc" } });
   const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /^[=+\-@]/.test(s) ? `"'${s.replace(/"/g, '""')}"` : `"${s.replace(/"/g, '""')}"`; };
   const head = ["Profile","Status","Name","Gender","Age","Phone","Email","Community","City","Education","Profession","Tags","Submitted"];
-  const lines = rows.map((m) => { const a = toAdminMember(m); return [a.profileCode, a.status, a.fullName, a.gender, a.age, a.phone, a.email, a.community, a.city, a.education, a.profession, a.tags.map((t) => `${t.category}:${t.value}`).join("; "), a.createdAt.toISOString()].map(esc).join(","); });
+  const admins = await Promise.all(rows.map(toAdminMember));
+  const lines = admins.map((a) => { return [a.profileCode, a.status, a.fullName, a.gender, a.age, a.phone, a.email, a.community, a.city, a.education, a.profession, a.tags.map((t) => `${t.category}:${t.value}`).join("; "), a.createdAt.toISOString()].map(esc).join(","); });
   await audit(adminId(req), "EXPORT", "Member", undefined, { count: rows.length });
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="sathsangath-members.csv"');
@@ -86,7 +87,7 @@ adminRouter.get("/members/:id", wrap(async (req, res) => {
     prisma.introRequest.findMany({ where: { requesterId: m.id }, include: { target: { select: { id: true, profileCode: true, fullName: true } } } }),
     prisma.visibilityOverride.findMany({ where: { viewerId: m.id }, include: { profile: { select: { id: true, profileCode: true, fullName: true } } } }),
   ]);
-  res.json({ ...toAdminMember(m), likesGiven, likesReceived, intros, overrides });
+  res.json({ ...(await toAdminMember(m)), likesGiven, likesReceived, intros, overrides });
 }));
 
 // Manual entry by admin (walk-in / phone enquiry)
@@ -116,7 +117,7 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
     include: includeTags,
   });
   await audit(adminId(req), "EDIT", "Member", m.id, { fields: Object.keys(req.body) });
-  res.json(toAdminMember(m));
+  res.json(await toAdminMember(m));
 }));
 
 // ---------- Review workflow ----------
@@ -175,7 +176,9 @@ adminRouter.post("/members/:id/resend-credentials", wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
+  const doomed = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: { photos: true } });
   await prisma.member.delete({ where: { id: pid(req.params.id) } });
+  if (doomed) await Promise.all([...doomed.photos.map((p) => removeObject(p.url)), removeObject(doomed.biodataFileUrl)]);
   await audit(adminId(req), "DELETE", "Member", pid(req.params.id));
   res.json({ ok: true });
 }));
@@ -183,8 +186,7 @@ adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (re
 adminRouter.get("/members/:id/document", wrap(async (req, res) => {
   const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) } });
   if (!m?.biodataFileUrl) throw new HttpError(404, "No document uploaded.");
-  if (/^https?:/.test(m.biodataFileUrl)) return res.json({ url: m.biodataFileUrl });
-  res.sendFile(path.join(UPLOAD_DIR, path.basename(path.dirname(m.biodataFileUrl)), path.basename(m.biodataFileUrl)));
+  res.json({ url: await resolveUrl(m.biodataFileUrl, 300) });
 }));
 
 // ---------- Tags ----------
@@ -271,7 +273,7 @@ adminRouter.get("/notifications", wrap(async (_req, res) => {
   const rows = await prisma.notification.findMany({ where: { audience: "ADMIN" }, orderBy: { createdAt: "desc" }, take: 200 });
   const ids = [...new Set(rows.flatMap((n) => { try { const d = JSON.parse(n.data ?? "{}"); return [d.a, d.b]; } catch { return []; } }).filter(Boolean))] as string[];
   const people = await prisma.member.findMany({ where: { id: { in: ids } }, select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } });
-  const byId = new Map(people.map((p) => [p.id, p]));
+  const byId = new Map(await Promise.all(people.map(async (p) => [p.id, { ...p, photoUrl: await resolveUrl(p.photoUrl) }] as const)));
   res.json(rows.map((n) => { let d: { a?: string; b?: string } = {}; try { d = JSON.parse(n.data ?? "{}"); } catch {} return { ...n, a: byId.get(d.a ?? "") ?? null, b: byId.get(d.b ?? "") ?? null }; }));
 }));
 adminRouter.post("/notifications/read-all", wrap(async (_req, res) => { await prisma.notification.updateMany({ where: { audience: "ADMIN", read: false }, data: { read: true } }); res.json({ ok: true }); }));

@@ -42,4 +42,4 @@ Errors: `{ "error": "message", "fields": { "phone": "..." } }` (HTTP 422 for val
 - `src/lib/notify.ts`: plug in a real SMS (MSG91/Twilio) and email provider. Today it logs to the console.
 - Serve behind HTTPS, set strong `JWT_SECRET`, restrict `CORS_ORIGINS` to the real website domain.
 - Google Form: add an Apps Script `onFormSubmit` that POSTs the answers to `/public/intake-webhook`.
-- Move uploads to private cloud storage (S3 / Drive) for production.
+- Media lives in object storage behind `src/lib/storage` (Cloudflare R2 by default; change `storage.provider` in `src/lib/config.ts` to `s3` for AWS S3, add a driver for GCS). Photos are served via short-lived signed URLs. Vercel caps request bodies at 4.5 MB.

@@ -1,24 +1,16 @@
 import { Router } from "express";
 import multer from "multer";
-import path from "path";
-import crypto from "crypto";
-import fs from "fs";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { config } from "../lib/config";
 import { activity, memberLabel, nextProfileCode, normPhone } from "../lib/util";
 import { rateLimit } from "express-rate-limit";
-
-export const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
-fs.mkdirSync(path.join(UPLOAD_DIR, "photos"), { recursive: true });
-fs.mkdirSync(path.join(UPLOAD_DIR, "docs"), { recursive: true });
+import { removeObject, saveUpload } from "../lib/storage";
 
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
-const storage = multer.diskStorage({
-  destination: (_r, f, cb) => cb(null, path.join(UPLOAD_DIR, f.fieldname === "photo" ? "photos" : "docs")),
-  filename: (_r, f, cb) => cb(null, crypto.randomBytes(16).toString("hex") + path.extname(f.originalname).toLowerCase()),
-});
+// Files are buffered in memory and handed to the storage provider (see lib/storage); nothing touches local disk.
+const storage = multer.memoryStorage();
 export const upload = multer({
   storage, limits: { fileSize: 8 * 1024 * 1024, files: 2 },
   fileFilter: (_r, f, cb) => (ALLOWED.has(f.mimetype) ? cb(null, true) : cb(new HttpError(422, "Only JPG, PNG, WebP or PDF files are allowed."))),
@@ -85,10 +77,11 @@ const limiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders
 publicRouter.post("/biodata", limiter, upload.fields([{ name: "photo", maxCount: 1 }, { name: "biodata", maxCount: 1 }]), wrap(async (req, res) => {
   const input = intakeSchema.parse(req.body);
   const f = req.files as Record<string, Express.Multer.File[]> | undefined;
-  const m = await createSubmission(input, "WEB", {
-    photoUrl: f?.photo?.[0] ? `/uploads/photos/${f.photo[0].filename}` : undefined,
-    biodataFileUrl: f?.biodata?.[0] ? `docs/${f.biodata[0].filename}` : undefined,
-  });
+  const photoUrl = f?.photo?.[0] ? await saveUpload("photos", f.photo[0]) : undefined;
+  const biodataFileUrl = f?.biodata?.[0] ? await saveUpload("docs", f.biodata[0]) : undefined;
+  let m;
+  try { m = await createSubmission(input, "WEB", { photoUrl, biodataFileUrl }); }
+  catch (e) { await Promise.all([removeObject(photoUrl), removeObject(biodataFileUrl)]); throw e; } // e.g. duplicate phone: don't orphan files
   res.status(201).json({ ok: true, reference: m.profileCode });
 }));
 

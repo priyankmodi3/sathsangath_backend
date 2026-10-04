@@ -2,10 +2,9 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
-import path from "path";
 import { config } from "./lib/config";
 import { errorHandler } from "./lib/http";
-import { publicRouter, UPLOAD_DIR } from "./routes/public";
+import { publicRouter } from "./routes/public";
 import { authRouter } from "./routes/auth";
 import { memberRouter } from "./routes/member";
 import { adminRouter } from "./routes/admin";
@@ -17,9 +16,6 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(cors({ origin: (o, cb) => cb(null, !o || config.corsOrigins.includes(o)), credentials: false }));
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "1mb" }));
-
-// Profile photos use unguessable filenames. Original bio data documents are NOT served here (admin endpoint only).
-app.use("/uploads/photos", express.static(path.join(UPLOAD_DIR, "photos"), { index: false, dotfiles: "deny" }));
 
 app.get("/health", (_r, res) => res.json({ ok: true }));
 

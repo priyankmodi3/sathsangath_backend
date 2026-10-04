@@ -27,7 +27,7 @@ authRouter.post("/login", loginLimiter, wrap(async (req, res) => {
   if (m.status !== "APPROVED") throw new HttpError(403, "Your bio data is still under review.");
   await prisma.member.update({ where: { id: m.id }, data: { lastLoginAt: new Date() } });
   await activity({ type: "MEMBER", memberId: m.id, name: memberLabel(m) }, "LOGIN", "Member", m.id);
-  res.json({ token: signToken({ kind: "member", id: m.id }), member: toSelf(m) });
+  res.json({ token: signToken({ kind: "member", id: m.id }), member: await toSelf(m) });
 }));
 
 authRouter.post("/change-password", requireMember, wrap(async (req, res) => {
