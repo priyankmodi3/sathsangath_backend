@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         String   @default("ADMIN") // SUPER_ADMIN | ADMIN | STAFF
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  audits       AuditLog[]
+}
+
+// One row per bio data. Once approved the same row is the login account.
+model Member {
+  id                 String   @id @default(cuid())
+  profileCode        String   @unique // shown instead of the real name, e.g. SS-1042
+  status             String   @default("PENDING") // PENDING | CORRECTION | REJECTED | APPROVED | SUSPENDED
+  adminNote          String?
+  source             String   @default("WEB") // WEB | GOOGLE_FORM | ADMIN
+
+  // --- identity (MASKED for other members) ---
+  fullName           String
+  phone              String   @unique
+  email              String?
+  familyPhone        String?
+  familyEmail        String?
+
+  // --- visible bio data ---
+  gender             String   // MALE | FEMALE
+  dob                DateTime
+  heightCm           Int?
+  maritalStatus      String?
+  community          String?
+  subCommunity       String?
+  city               String?
+  state              String?
+  education          String?
+  profession         String?
+  income             String?
+  diet               String?
+  fatherOccupation   String?
+  motherOccupation   String?
+  siblings           String?
+  familyBackground   String?
+  about              String?
+  photoUrl           String?
+  biodataFileUrl     String?  // admin-only original document
+
+  // --- partner preferences (comma separated lists) ---
+  prefCommunities    String   @default("")
+  prefCities         String   @default("")
+  prefAgeMin         Int?
+  prefAgeMax         Int?
+  prefNotes          String?
+  consentGiven       Boolean  @default(false)
+
+  // --- login ---
+  passwordHash       String?
+  mustChangePassword Boolean  @default(true)
+  lastLoginAt        DateTime?
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  approvedAt         DateTime?
+
+  tags               MemberTag[]
+  photos             Photo[]
+  likesGiven         Like[]          @relation("Liker")
+  likesReceived      Like[]          @relation("Liked")
+  introRequests      IntroRequest[]  @relation("Requester")
+  introTargets       IntroRequest[]  @relation("Target")
+  overridesAsViewer  VisibilityOverride[] @relation("OverrideViewer")
+  overridesAsProfile VisibilityOverride[] @relation("OverrideProfile")
+}
+
+// Admin-configurable tag system: category (Community, City, Education...) -> values.
+model TagCategory {
+  id     String     @id @default(cuid())
+  name   String     @unique
+  values TagValue[]
+}
+
+model TagValue {
+  id         String      @id @default(cuid())
+  categoryId String
+  value      String
+  category   TagCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  members    MemberTag[]
+  @@unique([categoryId, value])
+}
+
+model MemberTag {
+  memberId   String
+  tagValueId String
+  member     Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  tagValue   TagValue @relation(fields: [tagValueId], references: [id], onDelete: Cascade)
+  @@id([memberId, tagValueId])
+}
+
+// Admin manual show/hide of one profile for one viewer.
+model VisibilityOverride {
+  id        String @id @default(cuid())
+  viewerId  String
+  profileId String
+  action    String // SHOW | HIDE
+  viewer    Member @relation("OverrideViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+  profile   Member @relation("OverrideProfile", fields: [profileId], references: [id], onDelete: Cascade)
+  @@unique([viewerId, profileId])
+}
+
+model Like {
+  id        String   @id @default(cuid())
+  likerId   String
+  likedId   String
+  createdAt DateTime @default(now())
+  liker     Member   @relation("Liker", fields: [likerId], references: [id], onDelete: Cascade)
+  liked     Member   @relation("Liked", fields: [likedId], references: [id], onDelete: Cascade)
+  @@unique([likerId, likedId])
+}
+
+model IntroRequest {
+  id          String   @id @default(cuid())
+  requesterId String
+  targetId    String
+  status      String   @default("NEW") // NEW | UNDER_REVIEW | INTRODUCTION_FACILITATED | CLOSED
+  message     String?
+  adminNote   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  requester   Member   @relation("Requester", fields: [requesterId], references: [id], onDelete: Cascade)
+  target      Member   @relation("Target", fields: [targetId], references: [id], onDelete: Cascade)
+  @@unique([requesterId, targetId])
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String?
+  email     String?
+  message   String
+  handled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model SiteContent {
+  key       String   @id // e.g. home.hero, about.story
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String    @id @default(cuid())
+  adminId   String?
+  actorType String    @default("ADMIN") // ADMIN | MEMBER | PUBLIC
+  actorName String?
+  memberId  String?
+  action    String
+  entity    String
+  entityId  String?
+  detail    String?
+  createdAt DateTime  @default(now())
+  admin     AdminUser? @relation(fields: [adminId], references: [id])
+}
+
+model Photo {
+  id        String   @id @default(cuid())
+  memberId  String
+  url       String
+  isMain    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  @@index([memberId])
+}
+
+model Announcement {
+  id        String   @id @default(cuid())
+  title     String
+  body      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// In-app notifications. audience ADMIN = staff bell, MEMBER = one member (memberId).
+model Notification {
+  id        String   @id @default(cuid())
+  audience  String   // ADMIN | MEMBER
+  memberId  String?
+  type      String   // MUTUAL_LIKE | ANNOUNCEMENT
+  title     String
+  body      String
+  data      String?  // JSON (e.g. the two member ids) for deep links
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  @@index([audience, memberId, read])
+}

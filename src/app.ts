@@ -1,0 +1,35 @@
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import morgan from "morgan";
+import path from "path";
+import { config } from "./lib/config";
+import { errorHandler } from "./lib/http";
+import { publicRouter, UPLOAD_DIR } from "./routes/public";
+import { authRouter } from "./routes/auth";
+import { memberRouter } from "./routes/member";
+import { adminRouter } from "./routes/admin";
+
+export const app = express();
+app.set("trust proxy", 1);
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+// Native mobile apps send no Origin header and are unaffected by CORS.
+app.use(cors({ origin: (o, cb) => cb(null, !o || config.corsOrigins.includes(o)), credentials: false }));
+app.use(morgan("tiny"));
+app.use(express.json({ limit: "1mb" }));
+
+// Profile photos use unguessable filenames. Original bio data documents are NOT served here (admin endpoint only).
+app.use("/uploads/photos", express.static(path.join(UPLOAD_DIR, "photos"), { index: false, dotfiles: "deny" }));
+
+app.get("/health", (_r, res) => res.json({ ok: true }));
+
+// Versioned API: the same contract serves the website and the future Android / iOS apps.
+const v1 = express.Router();
+v1.use("/public", publicRouter);
+v1.use("/auth", authRouter);
+v1.use("/member", memberRouter);
+v1.use("/admin", adminRouter);
+app.use("/api/v1", v1);
+
+app.use((_r, res) => res.status(404).json({ error: "Not found." }));
+app.use(errorHandler);

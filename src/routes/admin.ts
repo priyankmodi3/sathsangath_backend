@@ -1,0 +1,297 @@
+import { Router } from "express";
+import bcrypt from "bcryptjs";
+import path from "path";
+import { z } from "zod";
+import type { Prisma } from "@prisma/client";
+import { prisma } from "../lib/db";
+import { HttpError, wrap } from "../lib/http";
+import { requireAdmin } from "../lib/auth";
+import { includeTags } from "../lib/matching";
+import { toAdminMember } from "../lib/serializers";
+import { audit, tempPassword } from "../lib/util";
+import { notifyMember } from "../lib/notify";
+import { config } from "../lib/config";
+import { createSubmission, intakeSchema, UPLOAD_DIR } from "./public";
+
+export const adminRouter = Router();
+adminRouter.use(requireAdmin());
+const adminId = (r: { actor?: { id: string } }) => r.actor!.id;
+const pid = (v: unknown) => String(v);
+
+// ---------- Dashboard ----------
+adminRouter.get("/dashboard", wrap(async (_req, res) => {
+  const [pending, correction, active, suspended, newRequests, likes, messages, mutualNew, recentLikes, recentPending] = await Promise.all([
+    prisma.member.count({ where: { status: "PENDING" } }),
+    prisma.member.count({ where: { status: "CORRECTION" } }),
+    prisma.member.count({ where: { status: "APPROVED" } }),
+    prisma.member.count({ where: { status: "SUSPENDED" } }),
+    prisma.introRequest.count({ where: { status: "NEW" } }),
+    prisma.like.count(),
+    prisma.contactMessage.count({ where: { handled: false } }),
+    prisma.notification.count({ where: { audience: "ADMIN", read: false } }),
+    prisma.like.findMany({ take: 6, orderBy: { createdAt: "desc" }, include: { liker: { select: { profileCode: true, fullName: true } }, liked: { select: { profileCode: true } } } }),
+    prisma.member.findMany({ where: { status: "PENDING" }, take: 6, orderBy: { createdAt: "desc" }, select: { id: true, profileCode: true, fullName: true, gender: true, city: true, createdAt: true } }),
+  ]);
+  res.json({ counts: { pending, correction, active, suspended, newRequests, likes, messages, mutualNew }, recentLikes, recentPending });
+}));
+
+// ---------- Members / submissions ----------
+const listQuery = z.object({
+  status: z.string().optional(), q: z.string().trim().optional(), gender: z.string().optional(),
+  city: z.string().optional(), community: z.string().optional(), tag: z.string().optional(),
+  ageMin: z.coerce.number().optional(), ageMax: z.coerce.number().optional(),
+  page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20),
+});
+function buildWhere(q: z.infer<typeof listQuery>): Prisma.MemberWhereInput {
+  const w: Prisma.MemberWhereInput = {};
+  if (q.status) w.status = q.status;
+  if (q.gender) w.gender = q.gender;
+  if (q.city) w.city = { contains: q.city, mode: "insensitive" };
+  if (q.community) w.community = { contains: q.community, mode: "insensitive" };
+  if (q.tag) w.tags = { some: { tagValueId: q.tag } };
+  if (q.q) w.OR = [{ fullName: { contains: q.q, mode: "insensitive" } }, { phone: { contains: q.q } }, { email: { contains: q.q, mode: "insensitive" } }, { profileCode: { contains: q.q, mode: "insensitive" } }];
+  const now = new Date();
+  if (q.ageMin) w.dob = { ...(w.dob as object), lte: new Date(now.getFullYear() - q.ageMin, now.getMonth(), now.getDate()) };
+  if (q.ageMax) w.dob = { ...(w.dob as object), gte: new Date(now.getFullYear() - q.ageMax - 1, now.getMonth(), now.getDate()) };
+  return w;
+}
+
+adminRouter.get("/members", wrap(async (req, res) => {
+  const q = listQuery.parse(req.query);
+  const where = buildWhere(q);
+  const [total, rows] = await Promise.all([
+    prisma.member.count({ where }),
+    prisma.member.findMany({ where, include: includeTags, orderBy: { createdAt: "desc" }, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
+  ]);
+  res.json({ total, page: q.page, pageSize: q.pageSize, items: rows.map(toAdminMember) });
+}));
+
+adminRouter.get("/members/export.csv", wrap(async (req, res) => {
+  const rows = await prisma.member.findMany({ where: buildWhere(listQuery.parse(req.query)), include: includeTags, orderBy: { createdAt: "desc" } });
+  const esc = (v: unknown) => { const s = v == null ? "" : String(v); return /^[=+\-@]/.test(s) ? `"'${s.replace(/"/g, '""')}"` : `"${s.replace(/"/g, '""')}"`; };
+  const head = ["Profile","Status","Name","Gender","Age","Phone","Email","Community","City","Education","Profession","Tags","Submitted"];
+  const lines = rows.map((m) => { const a = toAdminMember(m); return [a.profileCode, a.status, a.fullName, a.gender, a.age, a.phone, a.email, a.community, a.city, a.education, a.profession, a.tags.map((t) => `${t.category}:${t.value}`).join("; "), a.createdAt.toISOString()].map(esc).join(","); });
+  await audit(adminId(req), "EXPORT", "Member", undefined, { count: rows.length });
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="sathsangath-members.csv"');
+  res.send("﻿" + [head.join(","), ...lines].join("\r\n"));
+}));
+
+adminRouter.get("/members/:id", wrap(async (req, res) => {
+  const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: includeTags });
+  if (!m) throw new HttpError(404, "Member not found.");
+  const [likesGiven, likesReceived, intros, overrides] = await Promise.all([
+    prisma.like.findMany({ where: { likerId: m.id }, include: { liked: { select: { id: true, profileCode: true, fullName: true } } } }),
+    prisma.like.count({ where: { likedId: m.id } }),
+    prisma.introRequest.findMany({ where: { requesterId: m.id }, include: { target: { select: { id: true, profileCode: true, fullName: true } } } }),
+    prisma.visibilityOverride.findMany({ where: { viewerId: m.id }, include: { profile: { select: { id: true, profileCode: true, fullName: true } } } }),
+  ]);
+  res.json({ ...toAdminMember(m), likesGiven, likesReceived, intros, overrides });
+}));
+
+// Manual entry by admin (walk-in / phone enquiry)
+adminRouter.post("/members", wrap(async (req, res) => {
+  const m = await createSubmission(intakeSchema.parse({ consent: true, ...req.body }), "ADMIN");
+  await audit(adminId(req), "CREATE", "Member", m.id);
+  res.status(201).json({ id: m.id, profileCode: m.profileCode });
+}));
+
+const editSchema = z.object({
+  fullName: z.string().trim().min(2), phone: z.string().trim(), email: z.string().trim().nullable(),
+  familyPhone: z.string().trim().nullable(), familyEmail: z.string().trim().nullable(),
+  gender: z.enum(["MALE", "FEMALE"]), heightCm: z.number().int().nullable(), maritalStatus: z.string().nullable(),
+  community: z.string().nullable(), subCommunity: z.string().nullable(), city: z.string().nullable(), state: z.string().nullable(),
+  education: z.string().nullable(), profession: z.string().nullable(), income: z.string().nullable(), diet: z.string().nullable(),
+  fatherOccupation: z.string().nullable(), motherOccupation: z.string().nullable(), siblings: z.string().nullable(),
+  familyBackground: z.string().nullable(), about: z.string().nullable(), prefAgeMin: z.number().int().nullable(), prefAgeMax: z.number().int().nullable(),
+  prefNotes: z.string().nullable(), adminNote: z.string().nullable(),
+  prefCommunities: z.array(z.string()), prefCities: z.array(z.string()),
+}).partial();
+
+adminRouter.patch("/members/:id", wrap(async (req, res) => {
+  const { prefCommunities, prefCities, ...d } = editSchema.parse(req.body);
+  const m = await prisma.member.update({
+    where: { id: pid(req.params.id) },
+    data: { ...d, ...(prefCommunities && { prefCommunities: prefCommunities.join(",") }), ...(prefCities && { prefCities: prefCities.join(",") }) },
+    include: includeTags,
+  });
+  await audit(adminId(req), "EDIT", "Member", m.id, { fields: Object.keys(req.body) });
+  res.json(toAdminMember(m));
+}));
+
+// ---------- Review workflow ----------
+async function issueCredentials(id: string) {
+  const pw = tempPassword();
+  const m = await prisma.member.update({ where: { id }, data: { passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
+  await notifyMember(m, "Your Sathsangath login",
+    `Namaste ${m.fullName.split(" ")[0]}, your Sathsangath bio data is approved. Login: ${config.webLoginUrl} | Member ID: ${m.profileCode} (or mobile ${m.phone}) | Temporary password: ${pw}. You will be asked to change it on first login.`);
+}
+
+adminRouter.post("/members/:id/approve", wrap(async (req, res) => {
+  const { tagIds } = z.object({ tagIds: z.array(z.string()).default([]) }).parse(req.body ?? {});
+  const id = pid(req.params.id);
+  const cur = await prisma.member.findUnique({ where: { id } });
+  if (!cur) throw new HttpError(404, "Member not found.");
+  await prisma.$transaction([
+    prisma.memberTag.deleteMany({ where: { memberId: id } }),
+    ...tagIds.map((t) => prisma.memberTag.create({ data: { memberId: id, tagValueId: t } })),
+    prisma.member.update({ where: { id }, data: { status: "APPROVED", approvedAt: new Date(), adminNote: null } }),
+  ]);
+  if (!cur.passwordHash) await issueCredentials(id);
+  await audit(adminId(req), "APPROVE", "Member", id, { tagIds });
+  res.json({ ok: true });
+}));
+
+adminRouter.post("/members/:id/correction", wrap(async (req, res) => {
+  const { note } = z.object({ note: z.string().trim().min(5, "Tell the member what to correct") }).parse(req.body);
+  const m = await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "CORRECTION", adminNote: note } });
+  await notifyMember(m, "Please update your Sathsangath bio data", `Namaste, we need a small correction in your bio data: ${note}. Please contact us on WhatsApp or resubmit the form.`);
+  await audit(adminId(req), "REQUEST_CORRECTION", "Member", m.id, { note });
+  res.json({ ok: true });
+}));
+
+adminRouter.post("/members/:id/reject", wrap(async (req, res) => {
+  const { note } = z.object({ note: z.string().trim().min(5, "Add a short reason") }).parse(req.body);
+  const m = await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "REJECTED", adminNote: note } });
+  await notifyMember(m, "Update on your Sathsangath bio data", "Namaste, we are unable to take your bio data forward at this time. Please contact us on WhatsApp for details.");
+  await audit(adminId(req), "REJECT", "Member", m.id, { note });
+  res.json({ ok: true });
+}));
+
+adminRouter.post("/members/:id/suspend", wrap(async (req, res) => {
+  const { note } = z.object({ note: z.string().trim().optional() }).parse(req.body ?? {});
+  await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "SUSPENDED", adminNote: note } });
+  await audit(adminId(req), "SUSPEND", "Member", pid(req.params.id), { note });
+  res.json({ ok: true });
+}));
+adminRouter.post("/members/:id/reactivate", wrap(async (req, res) => {
+  await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "APPROVED", adminNote: null } });
+  await audit(adminId(req), "REACTIVATE", "Member", pid(req.params.id));
+  res.json({ ok: true });
+}));
+adminRouter.post("/members/:id/resend-credentials", wrap(async (req, res) => {
+  await issueCredentials(pid(req.params.id));
+  await audit(adminId(req), "RESEND_CREDENTIALS", "Member", pid(req.params.id));
+  res.json({ ok: true });
+}));
+adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
+  await prisma.member.delete({ where: { id: pid(req.params.id) } });
+  await audit(adminId(req), "DELETE", "Member", pid(req.params.id));
+  res.json({ ok: true });
+}));
+
+adminRouter.get("/members/:id/document", wrap(async (req, res) => {
+  const m = await prisma.member.findUnique({ where: { id: pid(req.params.id) } });
+  if (!m?.biodataFileUrl) throw new HttpError(404, "No document uploaded.");
+  if (/^https?:/.test(m.biodataFileUrl)) return res.json({ url: m.biodataFileUrl });
+  res.sendFile(path.join(UPLOAD_DIR, path.basename(path.dirname(m.biodataFileUrl)), path.basename(m.biodataFileUrl)));
+}));
+
+// ---------- Tags ----------
+adminRouter.get("/tags", wrap(async (_req, res) => {
+  res.json(await prisma.tagCategory.findMany({ include: { values: { orderBy: { value: "asc" } } }, orderBy: { name: "asc" } }));
+}));
+adminRouter.post("/tags/categories", wrap(async (req, res) => {
+  const { name } = z.object({ name: z.string().trim().min(2, "Enter a category name") }).parse(req.body);
+  res.status(201).json(await prisma.tagCategory.create({ data: { name } }));
+}));
+adminRouter.delete("/tags/categories/:id", wrap(async (req, res) => { await prisma.tagCategory.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
+adminRouter.post("/tags/values", wrap(async (req, res) => {
+  const d = z.object({ categoryId: z.string(), value: z.string().trim().min(1, "Enter a value") }).parse(req.body);
+  res.status(201).json(await prisma.tagValue.upsert({ where: { categoryId_value: d }, create: d, update: {} }));
+}));
+adminRouter.delete("/tags/values/:id", wrap(async (req, res) => { await prisma.tagValue.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
+
+adminRouter.put("/members/:id/tags", wrap(async (req, res) => {
+  const { tagIds } = z.object({ tagIds: z.array(z.string()) }).parse(req.body);
+  const id = pid(req.params.id);
+  await prisma.$transaction([prisma.memberTag.deleteMany({ where: { memberId: id } }), ...tagIds.map((t) => prisma.memberTag.create({ data: { memberId: id, tagValueId: t } }))]);
+  await audit(adminId(req), "TAG", "Member", id, { tagIds });
+  res.json({ ok: true });
+}));
+
+// ---------- Visibility overrides ----------
+adminRouter.put("/overrides", wrap(async (req, res) => {
+  const d = z.object({ viewerId: z.string(), profileId: z.string(), action: z.enum(["SHOW", "HIDE"]) }).parse(req.body);
+  if (d.viewerId === d.profileId) throw new HttpError(422, "Choose two different members.");
+  await prisma.visibilityOverride.upsert({ where: { viewerId_profileId: { viewerId: d.viewerId, profileId: d.profileId } }, create: d, update: { action: d.action } });
+  await audit(adminId(req), `OVERRIDE_${d.action}`, "Member", d.viewerId, d);
+  res.json({ ok: true });
+}));
+adminRouter.delete("/overrides/:id", wrap(async (req, res) => { await prisma.visibilityOverride.delete({ where: { id: pid(req.params.id) } }); res.json({ ok: true }); }));
+
+// ---------- Likes & introduction requests ----------
+adminRouter.get("/likes", wrap(async (_req, res) => {
+  res.json(await prisma.like.findMany({ orderBy: { createdAt: "desc" }, take: 200, include: { liker: { select: { id: true, profileCode: true, fullName: true, phone: true } }, liked: { select: { id: true, profileCode: true, fullName: true, phone: true } } } }));
+}));
+adminRouter.get("/introductions", wrap(async (req, res) => {
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  res.json(await prisma.introRequest.findMany({
+    where: status ? { status } : {}, orderBy: { createdAt: "desc" },
+    include: { requester: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } }, target: { select: { id: true, profileCode: true, fullName: true, phone: true, email: true } } },
+  }));
+}));
+adminRouter.patch("/introductions/:id", wrap(async (req, res) => {
+  const d = z.object({ status: z.enum(["NEW", "UNDER_REVIEW", "INTRODUCTION_FACILITATED", "CLOSED"]), adminNote: z.string().trim().optional() }).parse(req.body);
+  const r = await prisma.introRequest.update({ where: { id: pid(req.params.id) }, data: d });
+  await audit(adminId(req), "INTRO_STATUS", "IntroRequest", r.id, d);
+  res.json(r);
+}));
+
+// ---------- Messages, blog, content, audit ----------
+adminRouter.get("/messages", wrap(async (_req, res) => { res.json(await prisma.contactMessage.findMany({ orderBy: { createdAt: "desc" }, take: 200 })); }));
+adminRouter.patch("/messages/:id", wrap(async (req, res) => { res.json(await prisma.contactMessage.update({ where: { id: pid(req.params.id) }, data: { handled: !!req.body.handled } })); }));
+
+// ---------- Announcements (members see these in their panel) ----------
+const announcementSchema = z.object({ title: z.string().trim().min(3, "Enter a title"), body: z.string().trim().min(5, "Write the announcement"), active: z.boolean().default(true) });
+adminRouter.get("/announcements", wrap(async (_req, res) => { res.json(await prisma.announcement.findMany({ orderBy: { createdAt: "desc" } })); }));
+adminRouter.post("/announcements", wrap(async (req, res) => {
+  const d = announcementSchema.parse(req.body);
+  const a = await prisma.announcement.create({ data: d });
+  if (d.active) {
+    const members = await prisma.member.findMany({ where: { status: "APPROVED" }, select: { id: true } });
+    await prisma.notification.createMany({ data: members.map((m) => ({ audience: "MEMBER", memberId: m.id, type: "ANNOUNCEMENT", title: d.title, body: d.body.slice(0, 160) })) });
+  }
+  await audit(adminId(req), "CREATE", "Announcement", a.id, { title: d.title });
+  res.status(201).json(a);
+}));
+adminRouter.put("/announcements/:id", wrap(async (req, res) => {
+  const a = await prisma.announcement.update({ where: { id: pid(req.params.id) }, data: announcementSchema.parse(req.body) });
+  await audit(adminId(req), "EDIT", "Announcement", a.id, { title: a.title });
+  res.json(a);
+}));
+adminRouter.delete("/announcements/:id", wrap(async (req, res) => {
+  await prisma.announcement.delete({ where: { id: pid(req.params.id) } });
+  await audit(adminId(req), "DELETE", "Announcement", pid(req.params.id));
+  res.json({ ok: true });
+}));
+
+// ---------- Admin notifications (mutual likes) ----------
+adminRouter.get("/notifications", wrap(async (_req, res) => {
+  const rows = await prisma.notification.findMany({ where: { audience: "ADMIN" }, orderBy: { createdAt: "desc" }, take: 200 });
+  const ids = [...new Set(rows.flatMap((n) => { try { const d = JSON.parse(n.data ?? "{}"); return [d.a, d.b]; } catch { return []; } }).filter(Boolean))] as string[];
+  const people = await prisma.member.findMany({ where: { id: { in: ids } }, select: { id: true, profileCode: true, fullName: true, phone: true, photoUrl: true, gender: true } });
+  const byId = new Map(people.map((p) => [p.id, p]));
+  res.json(rows.map((n) => { let d: { a?: string; b?: string } = {}; try { d = JSON.parse(n.data ?? "{}"); } catch {} return { ...n, a: byId.get(d.a ?? "") ?? null, b: byId.get(d.b ?? "") ?? null }; }));
+}));
+adminRouter.post("/notifications/read-all", wrap(async (_req, res) => { await prisma.notification.updateMany({ where: { audience: "ADMIN", read: false }, data: { read: true } }); res.json({ ok: true }); }));
+adminRouter.patch("/notifications/:id", wrap(async (req, res) => { await prisma.notification.update({ where: { id: pid(req.params.id) }, data: { read: true } }); res.json({ ok: true }); }));
+
+adminRouter.get("/audit", wrap(async (req, res) => {
+  const t = typeof req.query.actor === "string" ? req.query.actor : "";
+  const rows = await prisma.auditLog.findMany({
+    where: t ? { actorType: t } : {}, orderBy: { createdAt: "desc" }, take: 300, include: { admin: { select: { name: true } } },
+  });
+  res.json(rows.map((l) => ({ id: l.id, actorType: l.actorType, actor: l.admin?.name ?? l.actorName ?? (l.actorType === "PUBLIC" ? "Website visitor" : "System"), action: l.action, entity: l.entity, entityId: l.entityId, detail: l.detail, createdAt: l.createdAt })));
+}));
+
+// ---------- Staff ----------
+adminRouter.get("/staff", requireAdmin(["SUPER_ADMIN"]), wrap(async (_req, res) => {
+  res.json(await prisma.adminUser.findMany({ select: { id: true, name: true, email: true, role: true, active: true, createdAt: true } }));
+}));
+adminRouter.post("/staff", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
+  const d = z.object({ name: z.string().trim().min(2), email: z.string().trim().email(), password: z.string().min(8, "Use at least 8 characters"), role: z.enum(["ADMIN", "STAFF"]) }).parse(req.body);
+  const a = await prisma.adminUser.create({ data: { name: d.name, email: d.email.toLowerCase(), role: d.role, passwordHash: await bcrypt.hash(d.password, 11) } });
+  await audit(adminId(req), "CREATE", "AdminUser", a.id);
+  res.status(201).json({ id: a.id });
+}));
