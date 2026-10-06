@@ -4,3 +4,4 @@ dist
 prisma/dev.db*
 uploads/*
 !uploads/.gitkeep
+email-previews

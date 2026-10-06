@@ -8,7 +8,7 @@ import { requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
 import { toAdminMember } from "../lib/serializers";
 import { audit, tempPassword } from "../lib/util";
-import { notifyMember } from "../lib/notify";
+import { sendCorrection, sendCredentials, sendRejection } from "../lib/notify";
 import { config } from "../lib/config";
 import { createSubmission, intakeSchema } from "./public";
 import { removeObject, resolveUrl } from "../lib/storage";
@@ -124,8 +124,7 @@ adminRouter.patch("/members/:id", wrap(async (req, res) => {
 async function issueCredentials(id: string) {
   const pw = tempPassword();
   const m = await prisma.member.update({ where: { id }, data: { passwordHash: await bcrypt.hash(pw, 11), mustChangePassword: true } });
-  await notifyMember(m, "Your Sathsangath login",
-    `Namaste ${m.fullName.split(" ")[0]}, your Sathsangath bio data is approved. Login: ${config.webLoginUrl} | Member ID: ${m.profileCode} (or mobile ${m.phone}) | Temporary password: ${pw}. You will be asked to change it on first login.`);
+  return sendCredentials(m, pw); // { email, sms }: "sent" | "skipped" | "failed"
 }
 
 adminRouter.post("/members/:id/approve", wrap(async (req, res) => {
@@ -138,25 +137,25 @@ adminRouter.post("/members/:id/approve", wrap(async (req, res) => {
     ...tagIds.map((t) => prisma.memberTag.create({ data: { memberId: id, tagValueId: t } })),
     prisma.member.update({ where: { id }, data: { status: "APPROVED", approvedAt: new Date(), adminNote: null } }),
   ]);
-  if (!cur.passwordHash) await issueCredentials(id);
-  await audit(adminId(req), "APPROVE", "Member", id, { tagIds });
-  res.json({ ok: true });
+  const delivery = cur.passwordHash ? undefined : await issueCredentials(id);
+  await audit(adminId(req), "APPROVE", "Member", id, { tagIds, delivery });
+  res.json({ ok: true, delivery });
 }));
 
 adminRouter.post("/members/:id/correction", wrap(async (req, res) => {
   const { note } = z.object({ note: z.string().trim().min(5, "Tell the member what to correct") }).parse(req.body);
   const m = await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "CORRECTION", adminNote: note } });
-  await notifyMember(m, "Please update your Sathsangath bio data", `Namaste, we need a small correction in your bio data: ${note}. Please contact us on WhatsApp or resubmit the form.`);
-  await audit(adminId(req), "REQUEST_CORRECTION", "Member", m.id, { note });
-  res.json({ ok: true });
+  const delivery = await sendCorrection(m, note);
+  await audit(adminId(req), "REQUEST_CORRECTION", "Member", m.id, { note, delivery });
+  res.json({ ok: true, delivery });
 }));
 
 adminRouter.post("/members/:id/reject", wrap(async (req, res) => {
   const { note } = z.object({ note: z.string().trim().min(5, "Add a short reason") }).parse(req.body);
   const m = await prisma.member.update({ where: { id: pid(req.params.id) }, data: { status: "REJECTED", adminNote: note } });
-  await notifyMember(m, "Update on your Sathsangath bio data", "Namaste, we are unable to take your bio data forward at this time. Please contact us on WhatsApp for details.");
-  await audit(adminId(req), "REJECT", "Member", m.id, { note });
-  res.json({ ok: true });
+  const delivery = await sendRejection(m);
+  await audit(adminId(req), "REJECT", "Member", m.id, { note, delivery });
+  res.json({ ok: true, delivery });
 }));
 
 adminRouter.post("/members/:id/suspend", wrap(async (req, res) => {
@@ -171,9 +170,9 @@ adminRouter.post("/members/:id/reactivate", wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 adminRouter.post("/members/:id/resend-credentials", wrap(async (req, res) => {
-  await issueCredentials(pid(req.params.id));
-  await audit(adminId(req), "RESEND_CREDENTIALS", "Member", pid(req.params.id));
-  res.json({ ok: true });
+  const delivery = await issueCredentials(pid(req.params.id));
+  await audit(adminId(req), "RESEND_CREDENTIALS", "Member", pid(req.params.id), { delivery });
+  res.json({ ok: true, delivery });
 }));
 adminRouter.delete("/members/:id", requireAdmin(["SUPER_ADMIN"]), wrap(async (req, res) => {
   const doomed = await prisma.member.findUnique({ where: { id: pid(req.params.id) }, include: { photos: true } });

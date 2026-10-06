@@ -5,7 +5,9 @@ import { HttpError, wrap } from "../lib/http";
 import { requireMember } from "../lib/auth";
 import { matchesFor, includeTags, mutualIds } from "../lib/matching";
 import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
-import { activity, memberLabel, normPhone } from "../lib/util";
+import { activity, memberLabel } from "../lib/util";
+import { checkAnyPhone } from "../lib/phone";
+import { sendMutualMatch } from "../lib/notify";
 import { photoUpload } from "./public";
 import { removeObject, saveUpload } from "../lib/storage";
 
@@ -40,9 +42,9 @@ memberRouter.get("/me", wrap(async (req, res) => { res.json(await toSelf(await l
 // Only contact details are editable by the member. Bio data changes go through the admin.
 memberRouter.patch("/me", wrap(async (req, res) => {
   const d = z.object({
-    phone: z.string().transform(normPhone).pipe(z.string().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit mobile number")).optional(),
+    phone: z.string().transform((v, ctx) => { const r = checkAnyPhone(v); if (!r.ok) { ctx.addIssue({ code: "custom", message: r.error }); return z.NEVER; } return r.value; }).optional(),
     email: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => null)),
-    familyPhone: z.string().transform(normPhone).pipe(z.string().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit number")).optional(),
+    familyPhone: z.string().transform((v, ctx) => { const r = checkAnyPhone(v); if (!r.ok) { ctx.addIssue({ code: "custom", message: r.error }); return z.NEVER; } return r.value; }).optional(),
     familyEmail: z.string().trim().email("Enter a valid email").optional().or(z.literal("").transform(() => null)),
   }).parse(req.body);
   if (d.phone) {
@@ -166,6 +168,8 @@ memberRouter.put("/likes/:id", wrap(async (req, res) => {
           body: `${memberLabel(meRow)} and ${memberLabel(p)} liked each other.`, data: JSON.stringify({ a: meRow.id, b: p.id }) } }),
       ]);
       await activity(who(meRow), "MUTUAL_MATCH", "Member", p.id, { with: p.profileCode });
+      // email + SMS to both people (each call is best-effort and never throws)
+      await Promise.all([sendMutualMatch(meRow, p), sendMutualMatch(p, meRow)]);
     }
   } else mutual = (await mutualIds(me(req))).has(p.id);
   res.json({ liked: true, mutual });
