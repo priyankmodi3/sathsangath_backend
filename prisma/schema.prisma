@@ -42,6 +42,9 @@ model Member {
   community          String?
   subCommunity       String?
   city               String?
+  nativePlace        String?
+  country            String   @default("IN") // ISO code of the country they live in
+  religion           String   @default("Hindu")
   state              String?
   education          String?
   profession         String?

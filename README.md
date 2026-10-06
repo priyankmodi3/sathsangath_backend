@@ -39,7 +39,16 @@ Errors: `{ "error": "message", "fields": { "phone": "..." } }` (HTTP 422 for val
 
 ## Before go-live
 
-- `src/lib/notify.ts`: plug in a real SMS (MSG91/Twilio) and email provider. Today it logs to the console.
 - Serve behind HTTPS, set strong `JWT_SECRET`, restrict `CORS_ORIGINS` to the real website domain.
 - Google Form: add an Apps Script `onFormSubmit` that POSTs the answers to `/public/intake-webhook`.
 - Media lives in object storage behind `src/lib/storage` (Cloudflare R2 by default; change `storage.provider` in `src/lib/config.ts` to `s3` for AWS S3, add a driver for GCS). Photos are served via short-lived signed URLs. Vercel caps request bodies at 4.5 MB.
+
+
+## Email and SMS
+
+Every important event sends a branded email (logo, brand colours) and an SMS: **bio data received**, **approved + login details**, **correction needed**, **not taken forward**, and **mutual match**.
+
+- **Email** uses Gmail SMTP (`SMTP_*` in `.env`). Gmail requires an *App Password* (Google account > Security > 2-Step Verification > App passwords), and it always sends from the `SMTP_USER` address. Gmail allows about 500 emails a day; for higher volume switch to SES / SendGrid / Postmark by changing only the `SMTP_*` values.
+- **SMS** uses Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_FROM` or `TWILIO_MESSAGING_SERVICE_SID`). Until these are filled in, SMS runs in *console mode*: the text is printed in the server log and the admin screen says nothing was sent. For India, sending to Indian numbers needs a DLT-registered sender and templates (Twilio or MSG91 will walk you through it).
+- Templates live in `src/lib/email-templates.ts`; the logo is embedded from `src/assets/email/`.
+- `npm run mail:check` verifies the SMTP login and writes previews to `email-previews/`. `npm run mail:check -- you@example.com` also sends one real test email.
