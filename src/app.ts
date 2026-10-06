@@ -13,7 +13,14 @@ export const app = express();
 app.set("trust proxy", 1);
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 // Native mobile apps send no Origin header and are unaffected by CORS.
-app.use(cors({ origin: (o, cb) => cb(null, !o || config.corsOrigins.includes(o)), credentials: false }));
+const corsOptions: cors.CorsOptions = {
+  origin: (o, cb) => cb(null, !o || config.corsOrigins.includes(o)),
+  credentials: false,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  maxAge: 86400,
+};
+app.use(cors(corsOptions));
 app.use(morgan("tiny"));
 app.use(express.json({ limit: "1mb" }));
 
