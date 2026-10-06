@@ -3,9 +3,9 @@ import { z } from "zod";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
 import { requireMember } from "../lib/auth";
-import { matchesFor, includeTags, mutualIds } from "../lib/matching";
+import { matchesFor, filterOptionsFor, includeTags, mutualIds } from "../lib/matching";
 import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
-import { activity, memberLabel } from "../lib/util";
+import { activity, list, memberLabel } from "../lib/util";
 import { checkAnyPhone } from "../lib/phone";
 import { sendMutualMatch } from "../lib/notify";
 import { photoUpload } from "./public";
@@ -109,9 +109,16 @@ memberRouter.delete("/photos/:id", wrap(async (req, res) => {
 
 // ---------- Matches & profiles ----------
 memberRouter.get("/matches", wrap(async (req, res) => {
-  const q = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(50).default(12) }).parse(req.query);
+  const csv = z.string().optional().transform((v) => { const l = list(v); return l.length ? l : undefined; });
+  const num = z.coerce.number().int().min(0).optional();
+  const q = z.object({
+    page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(50).default(12),
+    ageMin: num, ageMax: num, heightMin: num, heightMax: num,
+    city: csv, maritalStatus: csv, education: csv, profession: csv, diet: csv, community: csv,
+  }).parse(req.query);
+  const { page: _p, pageSize: _s, ...filters } = q;
   const [all, mutual, likes] = await Promise.all([
-    matchesFor(me(req)), mutualIds(me(req)),
+    matchesFor(me(req), filters), mutualIds(me(req)),
     prisma.like.findMany({ where: { likerId: me(req) }, select: { likedId: true } }),
   ]);
   const liked = new Set(likes.map((l) => l.likedId));
@@ -120,6 +127,10 @@ memberRouter.get("/matches", wrap(async (req, res) => {
     total: all.length, page: q.page, pageSize: q.pageSize,
     items: await Promise.all(slice.map(async (m) => ({ ...(await (mutual.has(m.id) ? toMutualProfile(m) : toPublicProfile(m))), liked: liked.has(m.id), mutual: mutual.has(m.id) }))),
   });
+}));
+
+memberRouter.get("/matches/filter-options", wrap(async (req, res) => {
+  res.json(await filterOptionsFor(me(req)));
 }));
 
 /** A profile can be opened if it is in the viewer's curated feed, or if the two members liked each other. */
