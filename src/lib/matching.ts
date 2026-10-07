@@ -20,23 +20,47 @@ export async function mutualIds(memberId: string) {
 export type FeedFilters = {
   ageMin?: number; ageMax?: number; heightMin?: number; heightMax?: number;
   city?: string[]; maritalStatus?: string[]; education?: string[]; profession?: string[]; diet?: string[]; community?: string[];
+  subCommunity?: string[]; state?: string[]; motherTongue?: string[]; familyType?: string[]; nativePlace?: string[];
+  hasPhoto?: boolean;
+  /** Approved within the last 14 days. */
+  justJoined?: boolean;
+  /** Same city as the viewer. */
+  nearby?: boolean;
+  /** Matches part of the profile code, e.g. "1042" or "SS-1042". */
+  code?: string;
+  sort?: "new" | "ageAsc" | "ageDesc" | "heightDesc" | "heightAsc";
 };
+// NOTE: income is deliberately not filterable. It is only revealed after a mutual like, and filtering on it would leak it.
 
 const oneOf = (wanted: string[] | undefined, value: string | null) =>
   !wanted?.length || (!!value && wanted.some((w) => w.toLowerCase() === value.trim().toLowerCase()));
 
 type Candidate = Awaited<ReturnType<typeof curatedFeed>>[number];
 
-function applyFilters(items: Candidate[], f: FeedFilters) {
-  return items.filter((c) => {
+function applyFilters(items: Candidate[], f: FeedFilters, viewerCity?: string | null) {
+  const code = f.code?.trim().toLowerCase();
+  const since = Date.now() - 14 * 86400000;
+  const out = items.filter((c) => {
+    if (code && !c.profileCode.toLowerCase().includes(code)) return false;
+    if (f.hasPhoto && !c.photoUrl) return false;
+    if (f.justJoined && !(c.approvedAt && c.approvedAt.getTime() >= since)) return false;
+    if (f.nearby && (!viewerCity || c.city?.trim().toLowerCase() !== viewerCity.trim().toLowerCase())) return false;
     const age = ageFrom(c.dob);
     if (f.ageMin !== undefined && age < f.ageMin) return false;
     if (f.ageMax !== undefined && age > f.ageMax) return false;
     if (f.heightMin !== undefined && (c.heightCm == null || c.heightCm < f.heightMin)) return false;
     if (f.heightMax !== undefined && (c.heightCm == null || c.heightCm > f.heightMax)) return false;
     return oneOf(f.city, c.city) && oneOf(f.maritalStatus, c.maritalStatus) && oneOf(f.education, c.education)
-      && oneOf(f.profession, c.profession) && oneOf(f.diet, c.diet) && oneOf(f.community, c.community);
+      && oneOf(f.profession, c.profession) && oneOf(f.diet, c.diet) && oneOf(f.community, c.community)
+      && oneOf(f.subCommunity, c.subCommunity) && oneOf(f.state, c.state) && oneOf(f.motherTongue, c.motherTongue)
+      && oneOf(f.familyType, c.familyType) && oneOf(f.nativePlace, c.nativePlace);
   });
+  // The feed arrives newest-approved first; only re-sort when asked.
+  const by: Record<string, (a: Candidate, b: Candidate) => number> = {
+    ageAsc: (a, b) => ageFrom(a.dob) - ageFrom(b.dob), ageDesc: (a, b) => ageFrom(b.dob) - ageFrom(a.dob),
+    heightAsc: (a, b) => (a.heightCm ?? 1e9) - (b.heightCm ?? 1e9), heightDesc: (a, b) => (b.heightCm ?? -1) - (a.heightCm ?? -1),
+  };
+  return f.sort && by[f.sort] ? [...out].sort(by[f.sort]) : out;
 }
 
 /** Distinct values (and age/height ranges) present in the viewer's own feed, so the app only offers filters that can match. */
@@ -51,6 +75,9 @@ export async function filterOptionsFor(viewerId: string) {
     heightMin: heights.length ? Math.min(...heights) : null, heightMax: heights.length ? Math.max(...heights) : null,
     cities: distinct((c) => c.city), maritalStatuses: distinct((c) => c.maritalStatus), educations: distinct((c) => c.education),
     professions: distinct((c) => c.profession), diets: distinct((c) => c.diet), communities: distinct((c) => c.community),
+    subCommunities: distinct((c) => c.subCommunity), states: distinct((c) => c.state), motherTongues: distinct((c) => c.motherTongue),
+    familyTypes: distinct((c) => c.familyType), nativePlaces: distinct((c) => c.nativePlace),
+    withPhoto: feed.filter((c) => !!c.photoUrl).length, total: feed.length,
   };
 }
 
@@ -64,7 +91,9 @@ export async function filterOptionsFor(viewerId: string) {
  */
 export async function matchesFor(viewerId: string, filters?: FeedFilters) {
   const feed = await curatedFeed(viewerId);
-  return filters ? applyFilters(feed, filters) : feed;
+  if (!filters) return feed;
+  const viewerCity = filters.nearby ? (await prisma.member.findUnique({ where: { id: viewerId }, select: { city: true } }))?.city : undefined;
+  return applyFilters(feed, filters, viewerCity);
 }
 
 async function curatedFeed(viewerId: string) {

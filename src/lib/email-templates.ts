@@ -107,6 +107,16 @@ export function credentialsEmail(m: M, password: string): Email {
   });
 }
 
+export function approvedEmail(m: M): Email {
+  return layout({
+    subject: "Your Sathsangath bio data is approved", preheader: "You can now like profiles and request introductions.",
+    title: "Your bio data is approved", greeting: `Namaste ${firstName(m.fullName)},`, textLines: [],
+    paragraphs: ["Our team has reviewed and approved your bio data. Log in with the email you signed up with to see your matches, like profiles and request introductions."],
+    box: { heading: "Your reference", rows: [["Member ID", m.profileCode, true]] },
+    cta: { label: "Log in to Sathsangath", url: config.webLoginUrl },
+  });
+}
+
 export function correctionEmail(m: M, note: string): Email {
   return layout({
     subject: "A small update is needed on your Sathsangath bio data", preheader: "Our team needs one small correction before we can go ahead.",
@@ -154,6 +164,7 @@ export const sms = {
   credentials: (m: M, password: string) => `Sathsangath: your bio data is approved. Login ${config.webLoginUrl} | ID ${m.profileCode} | Temp password ${password}. Change it on first login.`,
   correction: (note: string) => `Sathsangath: we need a small correction in your bio data: ${note.slice(0, 90)}. Please WhatsApp us ${config.brand.supportPhone}.`,
   rejection: () => `Sathsangath: we are unable to take your bio data forward at this time. Please WhatsApp us on ${config.brand.supportPhone} for details.`,
+  approved: (m: M) => `Sathsangath: your bio data is approved (ID ${m.profileCode}). Log in with your email at ${config.webLoginUrl} to like profiles.`,
   received: (m: M) => `Sathsangath: we have received your bio data (ref ${m.profileCode}). Our team will review it in 2-3 working days.`,
   mutual: (other: { profileCode: string }) => `Sathsangath: it's a match! ${other.profileCode} liked your profile too. Log in to view their profile: ${config.webLoginUrl}`,
 };

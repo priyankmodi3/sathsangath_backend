@@ -1,6 +1,6 @@
 import { sendMail, type Delivery } from "./mailer";
 import { sendSms } from "./sms";
-import { correctionEmail, credentialsEmail, mutualEmail, receivedEmail, rejectionEmail, sms, type Email } from "./email-templates";
+import { approvedEmail, correctionEmail, credentialsEmail, mutualEmail, receivedEmail, rejectionEmail, sms, type Email } from "./email-templates";
 
 /**
  * High-level notifications. Each one sends an email (branded template) and an SMS to the member,
@@ -18,6 +18,7 @@ async function both(m: M, mail: Email, text: string): Promise<NotifyResult> {
 }
 
 export const sendCredentials = (m: M, password: string) => both(m, credentialsEmail(m, password), sms.credentials(m, password));
+export const sendApproved = (m: M) => both(m, approvedEmail(m), sms.approved(m));
 export const sendCorrection = (m: M, note: string) => both(m, correctionEmail(m, note), sms.correction(note));
 export const sendRejection = (m: M) => both(m, rejectionEmail(m), sms.rejection());
 export const sendSubmissionReceived = (m: M) => both(m, receivedEmail(m), sms.received(m));

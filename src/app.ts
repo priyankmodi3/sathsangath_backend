@@ -6,6 +6,7 @@ import { config } from "./lib/config";
 import { errorHandler } from "./lib/http";
 import { publicRouter } from "./routes/public";
 import { authRouter } from "./routes/auth";
+import { accountRouter } from "./routes/account";
 import { memberRouter } from "./routes/member";
 import { adminRouter } from "./routes/admin";
 
@@ -30,6 +31,7 @@ app.get("/health", (_r, res) => res.json({ ok: true }));
 const v1 = express.Router();
 v1.use("/public", publicRouter);
 v1.use("/auth", authRouter);
+v1.use("/account", accountRouter);
 v1.use("/member", memberRouter);
 v1.use("/admin", adminRouter);
 app.use("/api/v1", v1);

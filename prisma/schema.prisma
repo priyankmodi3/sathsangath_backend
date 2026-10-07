@@ -19,6 +19,16 @@ model AdminUser {
   audits       AuditLog[]
 }
 
+// A Firebase-backed sign-in (email+password or Google). The Member row is created when bio data is submitted.
+model Account {
+  id          String    @id @default(cuid())
+  firebaseUid String    @unique
+  email       String    @unique
+  createdAt   DateTime  @default(now())
+  lastLoginAt DateTime?
+  member      Member?
+}
+
 // One row per bio data. Once approved the same row is the login account.
 model Member {
   id                 String   @id @default(cuid())
@@ -55,6 +65,11 @@ model Member {
   siblings           String?
   familyBackground   String?
   about              String?
+  motherTongue       String?
+  fatherName         String?  // admin-only
+  motherName         String?  // admin-only
+  familyType         String?  // Joint | Nuclear | ...
+  createdBy          String?  // Self | Parent | Sibling | Relative (admin-only)
   photoUrl           String?
   biodataFileUrl     String?  // admin-only original document
 
@@ -64,9 +79,14 @@ model Member {
   prefAgeMin         Int?
   prefAgeMax         Int?
   prefNotes          String?
+  prefHeightMinCm    Int?
+  prefMaritalStatus  String?
+  prefRelocate       String?  // Yes | Maybe | No
   consentGiven       Boolean  @default(false)
 
   // --- login ---
+  accountId          String?  @unique
+  account            Account? @relation(fields: [accountId], references: [id])
   passwordHash       String?
   mustChangePassword Boolean  @default(true)
   lastLoginAt        DateTime?

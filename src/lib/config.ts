@@ -7,6 +7,7 @@ export const config = {
   corsOrigins: ["https://sathsangath-frontend.vercel.app", ...(process.env.CORS_ORIGINS ?? "").split(",")]
     .map((s) => s.trim().replace(/\/+$/, ""))
     .filter(Boolean),
+  firebaseProjectId: process.env.FIREBASE_PROJECT_ID ?? "sathsangath-9014",
   webhookSecret: process.env.INTAKE_WEBHOOK_SECRET ?? "",
   webLoginUrl: process.env.WEB_LOGIN_URL ?? "https://sathsangath-frontend.vercel.app/login",
   mail: {

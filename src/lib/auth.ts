@@ -4,8 +4,8 @@ import { config } from "./config";
 import { HttpError } from "./http";
 import { prisma } from "./db";
 
-export type Actor = { kind: "admin" | "member"; id: string; role?: string };
-declare global { namespace Express { interface Request { actor?: Actor } } }
+export type Actor = { kind: "admin" | "member" | "account"; id: string; role?: string };
+declare global { namespace Express { interface Request { actor?: Actor; accountId?: string } } }
 
 export const signToken = (a: Actor) =>
   jwt.sign(a, config.jwtSecret, { expiresIn: config.jwtExpires as jwt.SignOptions["expiresIn"] });
@@ -29,13 +29,35 @@ export const requireAdmin = (roles?: string[]) => async (req: Request, _res: Res
   } catch (e) { next(e); }
 };
 
+/** Members who can browse: approved, plus those whose bio data is waiting for review or a correction. */
+const BROWSE_STATUSES = ["PENDING", "CORRECTION", "APPROVED"];
+
 export const requireMember = async (req: Request, _res: Response, next: NextFunction) => {
   try {
     const a = readActor(req);
     if (a.kind !== "member") throw new HttpError(403, "Member access only.");
     const m = await prisma.member.findUnique({ where: { id: a.id }, select: { status: true } });
-    if (m?.status !== "APPROVED") throw new HttpError(403, "Your account is not active. Please contact Sathsangath.");
-    req.actor = a;
+    if (!m || !BROWSE_STATUSES.includes(m.status)) throw new HttpError(403, "Your account is not active. Please contact Sathsangath.");
+    req.actor = { ...a, role: m.status };
+    next();
+  } catch (e) { next(e); }
+};
+
+/** Use after requireMember on actions (liking, introductions) that need an approved profile. */
+export const requireApproved = (req: Request, _res: Response, next: NextFunction) => {
+  if (req.actor?.role !== "APPROVED") return next(new HttpError(403, "This unlocks once Sathsangath approves your bio data."));
+  next();
+};
+
+/** Signed-in Firebase user, with or without a Member row yet. Resolves req.accountId. */
+export const requireAccount = async (req: Request, _res: Response, next: NextFunction) => {
+  try {
+    const a = readActor(req);
+    if (a.kind === "account") { req.accountId = a.id; return next(); }
+    if (a.kind !== "member") throw new HttpError(403, "Please sign in to continue.");
+    const m = await prisma.member.findUnique({ where: { id: a.id }, select: { accountId: true } });
+    if (!m?.accountId) throw new HttpError(403, "Please sign in with your email to continue.");
+    req.accountId = m.accountId;
     next();
   } catch (e) { next(e); }
 };

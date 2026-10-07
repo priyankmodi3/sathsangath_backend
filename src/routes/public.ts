@@ -17,7 +17,7 @@ const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp", "application/p
 // Files are buffered in memory and handed to the storage provider (see lib/storage); nothing touches local disk.
 const storage = multer.memoryStorage();
 export const upload = multer({
-  storage, limits: { fileSize: 8 * 1024 * 1024, files: 2 },
+  storage, limits: { fileSize: 8 * 1024 * 1024, files: 4 },
   fileFilter: (_r, f, cb) => (ALLOWED.has(f.mimetype) ? cb(null, true) : cb(new HttpError(422, "Only JPG, PNG, WebP or PDF files are allowed."))),
 });
 /** Member photo gallery uploads: images only, up to 6 files of 6 MB. */
@@ -61,6 +61,8 @@ const intakeBase = z.object({
   fatherOccupation: opt, motherOccupation: opt, siblings: opt, familyBackground: opt, about: opt,
   prefCommunities: arr.optional(), prefCities: arr.optional(),
   prefAgeMin: num, prefAgeMax: num, prefNotes: opt,
+  motherTongue: opt, fatherName: opt, motherName: opt, familyType: opt, createdBy: opt,
+  prefHeightMinCm: num, prefMaritalStatus: opt, prefRelocate: opt,
   consent: bool.refine((v) => v, "Consent is required to submit your bio data"),
 });
 
@@ -85,20 +87,23 @@ export const intakeSchema = intakeBase.transform((v, ctx) => {
 });
 
 /** Shared by the website form, the Google-Form webhook and admin manual entry. */
-export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; biodataFileUrl?: string }) {
+export async function createSubmission(input: z.infer<typeof intakeSchema>, source: string, files?: { photoUrl?: string; photoUrls?: string[]; biodataFileUrl?: string }, accountId?: string) {
   const dupe = await prisma.member.findFirst({
     where: { OR: [{ phone: input.phone }, ...(input.email ? [{ email: input.email }] : [])] },
     select: { id: true },
   });
   if (dupe) throw new HttpError(409, "A bio data with this mobile number or email already exists. Please contact Sathsangath if you need to update it.");
   const { consent, prefCommunities, prefCities, dob, ...rest } = input;
+  const { photoUrls, ...fileFields } = files ?? {};
+  const photoList = photoUrls?.length ? photoUrls : fileFields.photoUrl ? [fileFields.photoUrl] : [];
   const created = await prisma.member.create({
     data: {
       ...rest, dob: new Date(dob), source, consentGiven: consent,
       profileCode: await nextProfileCode(),
       prefCommunities: (prefCommunities ?? []).join(","), prefCities: (prefCities ?? []).join(","),
-      ...files,
-      ...(files?.photoUrl && { photos: { create: { url: files.photoUrl, isMain: true } } }),
+      ...fileFields, ...(photoList[0] && { photoUrl: photoList[0] }),
+      ...(accountId && { accountId, mustChangePassword: false }), // self-signup members never get an admin-issued temp password
+      ...(photoList.length && { photos: { create: photoList.map((url, i) => ({ url, isMain: i === 0 })) } }),
     },
   });
   await activity({ type: "PUBLIC", name: memberLabel(created) }, "SUBMITTED_BIODATA", "Member", created.id, { source });

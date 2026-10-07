@@ -8,7 +8,7 @@ import { requireAdmin } from "../lib/auth";
 import { includeTags } from "../lib/matching";
 import { toAdminMember } from "../lib/serializers";
 import { audit, tempPassword } from "../lib/util";
-import { sendCorrection, sendCredentials, sendRejection } from "../lib/notify";
+import { sendApproved, sendCorrection, sendCredentials, sendRejection } from "../lib/notify";
 import { config } from "../lib/config";
 import { createSubmission, intakeSchema } from "./public";
 import { removeObject, resolveUrl } from "../lib/storage";
@@ -106,6 +106,8 @@ const editSchema = z.object({
   fatherOccupation: z.string().nullable(), motherOccupation: z.string().nullable(), siblings: z.string().nullable(),
   familyBackground: z.string().nullable(), about: z.string().nullable(), prefAgeMin: z.number().int().nullable(), prefAgeMax: z.number().int().nullable(),
   prefNotes: z.string().nullable(), adminNote: z.string().nullable(),
+  motherTongue: z.string().nullable(), fatherName: z.string().nullable(), motherName: z.string().nullable(), familyType: z.string().nullable(), createdBy: z.string().nullable(),
+  nativePlace: z.string().nullable(), prefHeightMinCm: z.number().int().nullable(), prefMaritalStatus: z.string().nullable(), prefRelocate: z.string().nullable(),
   prefCommunities: z.array(z.string()), prefCities: z.array(z.string()),
 }).partial();
 
@@ -137,7 +139,7 @@ adminRouter.post("/members/:id/approve", wrap(async (req, res) => {
     ...tagIds.map((t) => prisma.memberTag.create({ data: { memberId: id, tagValueId: t } })),
     prisma.member.update({ where: { id }, data: { status: "APPROVED", approvedAt: new Date(), adminNote: null } }),
   ]);
-  const delivery = cur.passwordHash ? undefined : await issueCredentials(id);
+  const delivery = cur.accountId ? await sendApproved(cur) : cur.passwordHash ? undefined : await issueCredentials(id);
   await audit(adminId(req), "APPROVE", "Member", id, { tagIds, delivery });
   res.json({ ok: true, delivery });
 }));

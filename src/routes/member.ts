@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/db";
 import { HttpError, wrap } from "../lib/http";
-import { requireMember } from "../lib/auth";
+import { requireApproved, requireMember } from "../lib/auth";
 import { matchesFor, filterOptionsFor, includeTags, mutualIds } from "../lib/matching";
 import { toMutualProfile, toPublicProfile, toSelf } from "../lib/serializers";
 import { activity, list, memberLabel } from "../lib/util";
@@ -115,6 +115,12 @@ memberRouter.get("/matches", wrap(async (req, res) => {
     page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(50).default(12),
     ageMin: num, ageMax: num, heightMin: num, heightMax: num,
     city: csv, maritalStatus: csv, education: csv, profession: csv, diet: csv, community: csv,
+    subCommunity: csv, state: csv, motherTongue: csv, familyType: csv, nativePlace: csv,
+    hasPhoto: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
+    justJoined: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
+    nearby: z.enum(["1", "true"]).optional().transform((v) => (v ? true : undefined)),
+    code: z.string().trim().max(20).optional(),
+    sort: z.enum(["new", "ageAsc", "ageDesc", "heightAsc", "heightDesc"]).optional(),
   }).parse(req.query);
   const { page: _p, pageSize: _s, ...filters } = q;
   const [all, mutual, likes] = await Promise.all([
@@ -155,7 +161,7 @@ memberRouter.get("/profiles/:id", wrap(async (req, res) => {
 }));
 
 // ---------- Likes ----------
-memberRouter.put("/likes/:id", wrap(async (req, res) => {
+memberRouter.put("/likes/:id", requireApproved, wrap(async (req, res) => {
   const { p } = await loadVisible(me(req), String(req.params.id));
   const existing = await prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: p.id } } });
   let mutual = false;
@@ -186,7 +192,7 @@ memberRouter.put("/likes/:id", wrap(async (req, res) => {
   res.json({ liked: true, mutual });
 }));
 
-memberRouter.delete("/likes/:id", wrap(async (req, res) => {
+memberRouter.delete("/likes/:id", requireApproved, wrap(async (req, res) => {
   const r = await prisma.like.deleteMany({ where: { likerId: me(req), likedId: String(req.params.id) } });
   if (r.count) { const m = await prisma.member.findUniqueOrThrow({ where: { id: me(req) } }); await activity(who(m), "REMOVED_LIKE", "Member", String(req.params.id)); }
   res.json({ liked: false });
@@ -205,7 +211,7 @@ memberRouter.get("/likes", wrap(async (req, res) => {
   })));
 }));
 
-memberRouter.post("/introductions", wrap(async (req, res) => {
+memberRouter.post("/introductions", requireApproved, wrap(async (req, res) => {
   const { profileId, message } = z.object({ profileId: z.string().min(1), message: z.string().trim().max(500).optional() }).parse(req.body);
   const like = await prisma.like.findUnique({ where: { likerId_likedId: { likerId: me(req), likedId: profileId } } });
   if (!like) throw new HttpError(422, "Like this profile first to request an introduction.");
